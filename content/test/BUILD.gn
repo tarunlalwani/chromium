@@ -1561,6 +1561,7 @@ test("content_browsertests") {
     "../browser/devtools/devtools_trust_token_browsertest.cc",
     "../browser/devtools/devtools_video_consumer_browsertest.cc",
     "../browser/devtools/protocol/devtools_network_resource_loader_browsertest.cc",
+    "../browser/devtools/protocol/devtools_fetch_failed_requests_browsertest.cc",
     "../browser/devtools/protocol/devtools_protocol_browsertest.cc",
     "../browser/devtools/protocol/devtools_protocol_test_support.cc",
     "../browser/devtools/protocol/devtools_protocol_test_support.h",
