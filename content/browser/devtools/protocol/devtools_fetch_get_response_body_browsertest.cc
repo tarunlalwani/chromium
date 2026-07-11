@@ -57,19 +57,12 @@ class DevToolsFetchGetResponseBodyTest : public DevToolsProtocolTest {
           body_params.Set("requestId", *request_id);
           SendCommandSync("Fetch.getResponseBody", std::move(body_params));
           got_body_++;
-          if (error()) {
-            body_errors_++;
-            ClearError();
-          }
-
+          // Protocol errors (e.g. CanGetResponseBody false) are expected on some
+          // failed-request pauses; still continue so the loader is not stuck.
           base::DictValue cont;
           cont.Set("requestId", *request_id);
           SendCommandSync("Fetch.continueResponse", std::move(cont));
           continued_++;
-          if (error()) {
-            continue_errors_++;
-            ClearError();
-          }
           in_auto_handle_ = false;
         }
       }
@@ -83,8 +76,6 @@ class DevToolsFetchGetResponseBodyTest : public DevToolsProtocolTest {
   bool in_auto_handle_ = false;
   int got_body_ = 0;
   int continued_ = 0;
-  int body_errors_ = 0;
-  int continue_errors_ = 0;
 };
 
 IN_PROC_BROWSER_TEST_F(DevToolsFetchGetResponseBodyTest,
