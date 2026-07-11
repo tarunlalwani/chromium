@@ -1,0 +1,53 @@
+PHASE=GREEN_RERUN
+BRANCH=fix/devtools-fetch-getresponsebody-null-resume
+HEAD=762b725493eb174d079af2fa5036edfcf97becbd
+TEST_START 2026-07-11T13:43:57Z
+IMPORTANT DEBUGGING NOTE: each test is run inside its own process.
+For debugging a test inside a debugger, use the
+--gtest_filter=<your_test_name> flag along with either
+--single-process-tests (to run the test in one launcher/browser process) or
+--single-process (to do the above, and also run Chrome in single-process mode).
+Using sharding settings from environment. This is shard 0/1
+Using 1 parallel jobs.
+Note: Google Test filter = DevToolsFetchGetResponseBodyTest.TimeBackOrderPostWithBodyDoesNotUseAfterFree
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from DevToolsFetchGetResponseBodyTest, where TypeParam = 
+[ RUN      ] DevToolsFetchGetResponseBodyTest.TimeBackOrderPostWithBodyDoesNotUseAfterFree
+[6876:6876:0711/134403.882750:ERROR:components/leveldb_proto/public/proto_database_provider.h:101] In memory database cannot use the given database directory
+
+DevTools listening on ws://127.0.0.1:42307/devtools/browser/a86d963e-4b48-4db6-9aa3-c3f20ffcfad6
+WARN: SystemInfo_vulkan.cpp:195 (HasKhronosValidationLayer): Vulkan validation layers are missing
+[6915:6915:0711/134404.181766:WARNING:sandbox/policy/linux/sandbox_linux.cc:405] InitializeSandbox() called with multiple threads in process gpu-process.
+[6915:6915:0711/134404.230148:WARNING:ui/gfx/linux/gbm_support_x11.cc:48] dri3 extension not supported.
+[6973:6973:0711/134406.695453:ERROR:content/renderer/render_process_impl.cc:220] WebFrame LEAKED 1 TIMES
+[       OK ] DevToolsFetchGetResponseBodyTest.TimeBackOrderPostWithBodyDoesNotUseAfterFree (5154 ms)
+[----------] 1 test from DevToolsFetchGetResponseBodyTest (5206 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (5207 ms total)
+[  PASSED  ] 1 test.
+[1/2] DevToolsFetchGetResponseBodyTest.TimeBackOrderPostWithBodyDoesNotUseAfterFree (7360 ms)
+Note: Google Test filter = DevToolsFetchGetResponseBodyTest.TimeBackOrderGetWithoutBodySurvives
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from DevToolsFetchGetResponseBodyTest, where TypeParam = 
+[ RUN      ] DevToolsFetchGetResponseBodyTest.TimeBackOrderGetWithoutBodySurvives
+[7022:7022:0711/134411.115344:ERROR:components/leveldb_proto/public/proto_database_provider.h:101] In memory database cannot use the given database directory
+
+DevTools listening on ws://127.0.0.1:39713/devtools/browser/414721a9-ceb3-4bd5-a3e4-e464c5eb7b82
+WARN: SystemInfo_vulkan.cpp:195 (HasKhronosValidationLayer): Vulkan validation layers are missing
+[7045:7045:0711/134411.420893:WARNING:sandbox/policy/linux/sandbox_linux.cc:405] InitializeSandbox() called with multiple threads in process gpu-process.
+[7045:7045:0711/134411.468517:WARNING:ui/gfx/linux/gbm_support_x11.cc:48] dri3 extension not supported.
+[7098:7098:0711/134413.754768:ERROR:content/renderer/render_process_impl.cc:220] WebFrame LEAKED 1 TIMES
+[       OK ] DevToolsFetchGetResponseBodyTest.TimeBackOrderGetWithoutBodySurvives (4862 ms)
+[----------] 1 test from DevToolsFetchGetResponseBodyTest (4867 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (4868 ms total)
+[  PASSED  ] 1 test.
+[2/2] DevToolsFetchGetResponseBodyTest.TimeBackOrderGetWithoutBodySurvives (6834 ms)
+SUCCESS: all tests passed.
+Tests took 15 seconds.
+TEST_EXIT=0
+DONE 2026-07-11T13:44:14Z
