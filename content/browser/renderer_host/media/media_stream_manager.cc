@@ -1634,7 +1634,7 @@ MediaStreamManager::~MediaStreamManager() {
 
 VideoCaptureManager* MediaStreamManager::video_capture_manager() const {
   DCHECK_CURRENTLY_ON(BrowserThread::IO);
-  DCHECK(video_capture_manager_.get());
+  // nullptr might be returned during shutdown.
   return video_capture_manager_.get();
 }
 
@@ -3945,14 +3945,19 @@ void MediaStreamManager::WillDestroyCurrentMessageLoop() {
   }
 #endif
 
+  // Destroy VideoCaptureHosts (and other IO-bound receivers) while
+  // VideoCaptureManager is still alive. Hosts call
+  // video_capture_manager()->DisconnectClient() from their destructor;
+  // nulling the manager first causes a DCHECK / null deref on quit.
+  requests_.clear();
+  dispatcher_hosts_.Clear();
+  video_capture_hosts_.Clear();
+
   audio_input_device_manager_ = nullptr;
   video_capture_manager_ = nullptr;
   media_devices_manager_ = nullptr;
   media_stream_manager = nullptr;
   preferred_audio_output_device_manager_ = nullptr;
-  requests_.clear();
-  dispatcher_hosts_.Clear();
-  video_capture_hosts_.Clear();
 }
 
 void MediaStreamManager::NotifyDevicesChanged(

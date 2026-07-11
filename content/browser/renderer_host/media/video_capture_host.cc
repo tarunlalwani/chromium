@@ -118,18 +118,22 @@ void VideoCaptureHost::Create(
 
 VideoCaptureHost::~VideoCaptureHost() {
   DCHECK_CURRENTLY_ON(BrowserThread::IO);
+  VideoCaptureManager* video_capture_manager =
+      media_stream_manager_ ? media_stream_manager_->video_capture_manager()
+                            : nullptr;
   for (auto it = controllers_.begin(); it != controllers_.end();) {
     const base::WeakPtr<VideoCaptureController>& controller = it->second;
-    if (controller) {
+    if (controller && video_capture_manager) {
       const VideoCaptureControllerID controller_id(it->first);
-      media_stream_manager_->video_capture_manager()->DisconnectClient(
+      video_capture_manager->DisconnectClient(
           controller.get(), controller_id, this,
           media::VideoCaptureError::kNone);
       ++it;
     } else {
       // Remove the entry for this controller_id so that when the controller
       // is added, the controller will be notified to stop for this client
-      // in DoControllerAdded.
+      // in DoControllerAdded. Also used when VideoCaptureManager is already
+      // gone during IO-thread shutdown.
       controllers_.erase(it++);
     }
   }

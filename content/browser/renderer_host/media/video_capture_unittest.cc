@@ -126,6 +126,9 @@ class VideoCaptureTest : public testing::Test,
   }
 
   void TearDown() override {
+    if (!host_) {
+      return;
+    }
     Mock::VerifyAndClearExpectations(host_.get());
     EXPECT_TRUE(host_->controllers_.empty());
 
@@ -341,6 +344,25 @@ class VideoCaptureTest : public testing::Test,
     base::RunLoop().RunUntilIdle();
   }
 
+
+  // Holds VideoCaptureManager alive so host controller WeakPtrs stay valid
+  // after WillDestroyCurrentMessageLoop nulls the MediaStreamManager member,
+  // then destroys the host — the production quit ordering that null-derefs.
+  void DestroyHostAfterVideoCaptureManagerShutdown() {
+    StartCapture();
+    ASSERT_FALSE(host_->controllers_.empty());
+
+    scoped_refptr<VideoCaptureManager> keep_alive(
+        media_stream_manager_->video_capture_manager());
+    ASSERT_TRUE(keep_alive);
+
+    media_stream_manager_->WillDestroyCurrentMessageLoop();
+
+    host_receiver_.reset();
+    host_.reset();
+    opened_device_label_.clear();
+  }
+
   MediaStreamManager* media_stream_manager() const {
     return media_stream_manager_.get();
   }
@@ -470,6 +492,17 @@ TEST_F(VideoCaptureTest, RegisterAndUnregisterWithMediaStreamManager) {
   // At this point, the pipe is closed and the VideoCaptureHost should be
   // removed from MediaStreamManager.
   EXPECT_EQ(media_stream_manager()->num_video_capture_hosts(), 0u);
+}
+
+// Repro for browser crash on quit: VideoCaptureHost::~VideoCaptureHost calls
+// media_stream_manager_->video_capture_manager()->DisconnectClient() after
+// MediaStreamManager::WillDestroyCurrentMessageLoop() has already set
+// video_capture_manager_ to nullptr (null manager, then
+// video_capture_hosts_.Clear()).
+//
+// Expected after fix: PASSES. Today: DCHECK (debug) or null deref (release).
+TEST_F(VideoCaptureTest, HostDestructorAfterVideoCaptureManagerShutdown) {
+  DestroyHostAfterVideoCaptureManagerShutdown();
 }
 
 }  // namespace content
