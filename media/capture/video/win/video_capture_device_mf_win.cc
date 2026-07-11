@@ -2286,9 +2286,9 @@ HRESULT VideoCaptureDeviceMFWin::DeliverTextureToClient(
   }
 
   auto gmb_handle = capture_buffer.handle_provider->GetGpuMemoryBufferHandle();
-  if (!gmb_handle.dxgi_handle().IsValid()) {
-    // If the device is removed and GMB tracker fails to recreate it,
-    // an empty gmb handle may be returned here.
+  // Empty handle is returned on DXGI device loss. dxgi_handle() CHECK_EQs
+  // DXGI_SHARED_HANDLE, so guard is_null() before touching the accessor.
+  if (gmb_handle.is_null() || !gmb_handle.dxgi_handle().IsValid()) {
     return MF_E_UNEXPECTED;
   }
   hr = CopyTextureToGpuMemoryBuffer(texture,

@@ -13,6 +13,7 @@
 
 #include "base/memory/scoped_refptr.h"
 #include "base/test/task_environment.h"
+#include "base/test/gtest_util.h"
 #include "media/base/win/test_utils.h"
 #include "media/capture/video/win/d3d_capture_test_utils.h"
 #include "media/capture/video/win/video_capture_device_factory_win.h"
@@ -138,6 +139,54 @@ TEST_F(GpuMemoryBufferTrackerWinTest, InvalidateOnDeviceLoss) {
                                             PIXEL_FORMAT_NV12, nullptr));
   gfx::GpuMemoryBufferHandle gmb = tracker->GetGpuMemoryBufferHandle();
   EXPECT_TRUE(gmb.is_null());
+}
+
+// Mirrors VideoCaptureDeviceMFWin::DeliverTextureToClient calling
+// gmb_handle.dxgi_handle().IsValid() after GetGpuMemoryBufferHandle() returns
+// empty on DXGI device loss (field: EXCEPTION_BREAKPOINT / CHECK).
+// Unsafe accessor still CHECKs on EMPTY (documents field crash mechanism).
+TEST_F(GpuMemoryBufferTrackerWinTest,
+       EmptyHandleAfterDeviceLossDxgiAccessChecks) {
+  const gfx::Size expected_buffer_size = {1920, 1080};
+  dxgi_device_manager_->GetMockDevice()->SetupDefaultMocks();
+  EXPECT_CALL(*(dxgi_device_manager_->GetMockDevice().Get()),
+              OnCreateTexture2D(_, _, _))
+      .Times(1);
+  EXPECT_CALL(*(dxgi_device_manager_->GetMockDevice().Get()),
+              OnGetDeviceRemovedReason())
+      .WillOnce([]() { return DXGI_ERROR_DEVICE_REMOVED; });
+
+  std::unique_ptr<VideoCaptureBufferTracker> tracker =
+      std::make_unique<GpuMemoryBufferTrackerWin>(dxgi_device_manager_);
+  ASSERT_TRUE(tracker->Init(expected_buffer_size, PIXEL_FORMAT_NV12, nullptr));
+  ASSERT_FALSE(tracker->IsReusableForFormat(expected_buffer_size,
+                                            PIXEL_FORMAT_NV12, nullptr));
+  gfx::GpuMemoryBufferHandle gmb = tracker->GetGpuMemoryBufferHandle();
+  ASSERT_TRUE(gmb.is_null());
+  EXPECT_CHECK_DEATH((void)gmb.dxgi_handle().IsValid());
+}
+
+// GREEN: DeliverTextureToClient-style guard must not CHECK on empty handle.
+TEST_F(GpuMemoryBufferTrackerWinTest,
+       EmptyHandleAfterDeviceLossSafeGuardDoesNotDie) {
+  const gfx::Size expected_buffer_size = {1920, 1080};
+  dxgi_device_manager_->GetMockDevice()->SetupDefaultMocks();
+  EXPECT_CALL(*(dxgi_device_manager_->GetMockDevice().Get()),
+              OnCreateTexture2D(_, _, _))
+      .Times(1);
+  EXPECT_CALL(*(dxgi_device_manager_->GetMockDevice().Get()),
+              OnGetDeviceRemovedReason())
+      .WillOnce([]() { return DXGI_ERROR_DEVICE_REMOVED; });
+
+  std::unique_ptr<VideoCaptureBufferTracker> tracker =
+      std::make_unique<GpuMemoryBufferTrackerWin>(dxgi_device_manager_);
+  ASSERT_TRUE(tracker->Init(expected_buffer_size, PIXEL_FORMAT_NV12, nullptr));
+  gfx::GpuMemoryBufferHandle gmb = tracker->GetGpuMemoryBufferHandle();
+  ASSERT_TRUE(gmb.is_null());
+  // Same short-circuit as fixed DeliverTextureToClient.
+  const bool is_valid_dxgi =
+      !gmb.is_null() && gmb.dxgi_handle().IsValid();
+  EXPECT_FALSE(is_valid_dxgi);
 }
 
 TEST_F(GpuMemoryBufferTrackerWinTest, GetMemorySizeInBytes) {
