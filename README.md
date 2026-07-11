@@ -63,3 +63,14 @@ manifestation. TimeBack’s command order still drives both.
 2. Upstream: WeakPtr Collect fix (prior) **and** bound-check before
    `client_receiver_.Resume()` in `GetResponseBody`.
 3. This share is **RED-only** — no interceptor fix commit.
+
+## Builder worktree
+
+Primary `/mnt/chromium/src` stays on `main`. Work this issue from:
+
+```bash
+export PATH=/mnt/chromium/bin:/mnt/chromium/depot_tools:$PATH
+cd "$(chromium-wt path fetch-uaf-red-getresponsebody)"
+```
+
+See `/mnt/chromium/WORKTREES.md`.
