@@ -20,13 +20,13 @@
 
 namespace content {
 
-// Regression (TimeBack / Electron Crashpad 8840e25c):
-// Fetch.enable (Response) + Fetch.getResponseBody → client_receiver_.Resume()
-// can null/UAF MultiplexRouter when a queued OnComplete resets the receiver
-// while the job remains gettable (kResponseReceived + waiting).
+// TimeBack product order on Fetch.requestPaused: Fetch.getResponseBody then
+// Fetch.continueResponse (see CDPDebuggerService::getResponseBodyAndContinue).
 //
-// Uses GET (no request_body) so NotifyClient does not enter RequestBodyCollector
-// (that is a separate UAF fixed by the failed-POST WeakPtr patch).
+// Crashpad 8840e25c (Windows release) dies in GetResponseBody →
+// MultiplexRouter::Resume with a null router. Under Linux ASAN, the same
+// product order with POST+body goes RED in NotifyClient/RequestBodyCollector
+// (sibling UAF; WeakPtr fix is a separate patch). GET-only avoids Collect.
 class DevToolsFetchGetResponseBodyTest : public DevToolsProtocolTest {
  public:
   void DispatchProtocolMessage(DevToolsAgentHost* agent_host,
@@ -48,7 +48,6 @@ class DevToolsFetchGetResponseBodyTest : public DevToolsProtocolTest {
             params ? params->FindString("requestId") : nullptr;
         if (request_id) {
           in_auto_handle_ = true;
-          // TimeBack order: body first, then continue.
           base::DictValue body_params;
           body_params.Set("requestId", *request_id);
           SendCommandSync("Fetch.getResponseBody", std::move(body_params));
@@ -67,42 +66,44 @@ class DevToolsFetchGetResponseBodyTest : public DevToolsProtocolTest {
   }
 
  protected:
+  void EnableFetchResponseInterception() {
+    base::DictValue enable_params;
+    base::ListValue patterns;
+    {
+      base::DictValue p;
+      p.Set("requestStage", "Response");
+      p.Set("resourceType", "Fetch");
+      patterns.Append(std::move(p));
+    }
+    {
+      base::DictValue p;
+      p.Set("requestStage", "Response");
+      p.Set("resourceType", "XHR");
+      patterns.Append(std::move(p));
+    }
+    enable_params.Set("patterns", std::move(patterns));
+    SendCommandSync("Fetch.enable", std::move(enable_params));
+    ASSERT_FALSE(error());
+  }
+
   bool auto_handle_paused_ = false;
   bool in_auto_handle_ = false;
   int got_body_ = 0;
   int continued_ = 0;
 };
 
+// RED under ASAN without the NotifyClient WeakPtr fix: POST+body causes
+// RequestBodyCollector Collect during NotifyClient; re-entrant
+// getResponseBody+continueResponse deletes the job → heap-use-after-free.
 IN_PROC_BROWSER_TEST_F(DevToolsFetchGetResponseBodyTest,
-                       ResponseStageGetResponseBodyDoesNotNullResume) {
+                       TimeBackOrderPostWithBodyDoesNotUseAfterFree) {
   ASSERT_TRUE(embedded_test_server()->Start());
   GURL page_url = embedded_test_server()->GetURL("/title1.html");
-  // Small cacheable GETs: OnReceiveResponse + OnComplete often queued before
-  // Pause(); GetResponseBody → Resume() then runs OnComplete which
-  // client_receiver_.reset()s underfoot.
-  GURL get_url = embedded_test_server()->GetURL("/echo");
+  GURL echo_url = embedded_test_server()->GetURL("/echo");
   NavigateToURLBlockUntilNavigationsComplete(shell(), page_url, 1);
 
   Attach();
-
-  base::DictValue enable_params;
-  base::ListValue patterns;
-  {
-    base::DictValue p;
-    p.Set("requestStage", "Response");
-    p.Set("resourceType", "Fetch");
-    patterns.Append(std::move(p));
-  }
-  {
-    base::DictValue p;
-    p.Set("requestStage", "Response");
-    p.Set("resourceType", "XHR");
-    patterns.Append(std::move(p));
-  }
-  enable_params.Set("patterns", std::move(patterns));
-  SendCommandSync("Fetch.enable", std::move(enable_params));
-  ASSERT_FALSE(error());
-
+  EnableFetchResponseInterception();
   auto_handle_paused_ = true;
 
   std::string script = base::StringPrintf(
@@ -110,14 +111,17 @@ IN_PROC_BROWSER_TEST_F(DevToolsFetchGetResponseBodyTest,
         const tasks = [];
         for (let i = 0; i < 40; i++) {
           tasks.push(
-              fetch('%s?n=' + i, {credentials: 'omit'})
-                  .then(r => r.text())
-                  .catch(() => null));
+              fetch('%s?n=' + i, {
+                method: 'POST',
+                credentials: 'omit',
+                headers: {'content-type': 'application/json'},
+                body: JSON.stringify({n: i, payload: 'x'.repeat(64)}),
+              }).then(r => r.text()).catch(() => null));
         }
         await Promise.allSettled(tasks);
         return 'done';
       })())",
-      get_url.spec().c_str());
+      echo_url.spec().c_str());
 
   content::ExecuteScriptAsync(shell()->web_contents(), script);
 
@@ -130,10 +134,48 @@ IN_PROC_BROWSER_TEST_F(DevToolsFetchGetResponseBodyTest,
   }
 
   auto_handle_paused_ = false;
+  EXPECT_GE(got_body_, 1);
+  EXPECT_GE(continued_, 1);
+  SendCommandSync("Fetch.disable");
+}
 
-  // Under ASAN/debug + bug: DCHECK(router_)/null Resume / UAF in
-  // MultiplexRouter while handling Fetch.getResponseBody.
-  // Must NOT be RequestBodyCollector (no POST body on this test).
+// GET has no request_body → NotifyClient skips RequestBodyCollector.
+IN_PROC_BROWSER_TEST_F(DevToolsFetchGetResponseBodyTest,
+                       TimeBackOrderGetWithoutBodySurvives) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+  GURL page_url = embedded_test_server()->GetURL("/title1.html");
+  GURL get_url = embedded_test_server()->GetURL("/echo");
+  NavigateToURLBlockUntilNavigationsComplete(shell(), page_url, 1);
+
+  Attach();
+  EnableFetchResponseInterception();
+  auto_handle_paused_ = true;
+
+  std::string script = base::StringPrintf(
+      R"((async () => {
+        const tasks = [];
+        for (let i = 0; i < 20; i++) {
+          tasks.push(
+              fetch('%s?n=' + i, {credentials: 'omit'})
+                  .then(r => r.text())
+                  .catch(() => null));
+        }
+        await Promise.allSettled(tasks);
+        return 'done';
+      })())",
+      get_url.spec().c_str());
+
+  content::ExecuteScriptAsync(shell()->web_contents(), script);
+
+  base::TimeTicks deadline = base::TimeTicks::Now() + base::Seconds(45);
+  while (base::TimeTicks::Now() < deadline && got_body_ < 3) {
+    base::RunLoop run_loop;
+    base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE, run_loop.QuitClosure(), base::Milliseconds(50));
+    run_loop.Run();
+  }
+
+  auto_handle_paused_ = false;
   EXPECT_GE(got_body_, 1);
   EXPECT_GE(continued_, 1);
   SendCommandSync("Fetch.disable");
