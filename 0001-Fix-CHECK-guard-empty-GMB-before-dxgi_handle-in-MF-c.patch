@@ -1,0 +1,183 @@
+From 0101ad68ee774a665a51ea6631946fafde2a0b27 Mon Sep 17 00:00:00 2001
+From: Ubuntu <ubuntu@ip-172-31-45-9.ap-south-1.compute.internal>
+Date: Sat, 11 Jul 2026 17:55:39 +0000
+Subject: [PATCH] Fix CHECK: guard empty GMB before dxgi_handle() in MF capture
+
+DeliverTextureToClient called dxgi_handle() on EMPTY_BUFFER after DXGI
+device loss. Short-circuit is_null() before the typed accessor and
+return MF_E_UNEXPECTED.
+
+Add death tests for empty typed accessors and a safe-guard GREEN test.
+---
+ .../gpu_memory_buffer_tracker_win_unittest.cc | 49 +++++++++++++++
+ .../video/win/video_capture_device_mf_win.cc  |  6 +-
+ ui/gfx/BUILD.gn                               |  1 +
+ ui/gfx/gpu_memory_buffer_handle_unittest.cc   | 60 +++++++++++++++++++
+ 4 files changed, 113 insertions(+), 3 deletions(-)
+ create mode 100644 ui/gfx/gpu_memory_buffer_handle_unittest.cc
+
+diff --git a/media/capture/video/win/gpu_memory_buffer_tracker_win_unittest.cc b/media/capture/video/win/gpu_memory_buffer_tracker_win_unittest.cc
+index b23651a65d46d..c47997794a571 100644
+--- a/media/capture/video/win/gpu_memory_buffer_tracker_win_unittest.cc
++++ b/media/capture/video/win/gpu_memory_buffer_tracker_win_unittest.cc
+@@ -13,6 +13,7 @@
+ 
+ #include "base/memory/scoped_refptr.h"
+ #include "base/test/task_environment.h"
++#include "base/test/gtest_util.h"
+ #include "media/base/win/test_utils.h"
+ #include "media/capture/video/win/d3d_capture_test_utils.h"
+ #include "media/capture/video/win/video_capture_device_factory_win.h"
+@@ -140,6 +141,54 @@ TEST_F(GpuMemoryBufferTrackerWinTest, InvalidateOnDeviceLoss) {
+   EXPECT_TRUE(gmb.is_null());
+ }
+ 
++// Mirrors VideoCaptureDeviceMFWin::DeliverTextureToClient calling
++// gmb_handle.dxgi_handle().IsValid() after GetGpuMemoryBufferHandle() returns
++// empty on DXGI device loss (field: EXCEPTION_BREAKPOINT / CHECK).
++// Unsafe accessor still CHECKs on EMPTY (documents field crash mechanism).
++TEST_F(GpuMemoryBufferTrackerWinTest,
++       EmptyHandleAfterDeviceLossDxgiAccessChecks) {
++  const gfx::Size expected_buffer_size = {1920, 1080};
++  dxgi_device_manager_->GetMockDevice()->SetupDefaultMocks();
++  EXPECT_CALL(*(dxgi_device_manager_->GetMockDevice().Get()),
++              OnCreateTexture2D(_, _, _))
++      .Times(1);
++  EXPECT_CALL(*(dxgi_device_manager_->GetMockDevice().Get()),
++              OnGetDeviceRemovedReason())
++      .WillOnce([]() { return DXGI_ERROR_DEVICE_REMOVED; });
++
++  std::unique_ptr<VideoCaptureBufferTracker> tracker =
++      std::make_unique<GpuMemoryBufferTrackerWin>(dxgi_device_manager_);
++  ASSERT_TRUE(tracker->Init(expected_buffer_size, PIXEL_FORMAT_NV12, nullptr));
++  ASSERT_FALSE(tracker->IsReusableForFormat(expected_buffer_size,
++                                            PIXEL_FORMAT_NV12, nullptr));
++  gfx::GpuMemoryBufferHandle gmb = tracker->GetGpuMemoryBufferHandle();
++  ASSERT_TRUE(gmb.is_null());
++  EXPECT_CHECK_DEATH((void)gmb.dxgi_handle().IsValid());
++}
++
++// GREEN: DeliverTextureToClient-style guard must not CHECK on empty handle.
++TEST_F(GpuMemoryBufferTrackerWinTest,
++       EmptyHandleAfterDeviceLossSafeGuardDoesNotDie) {
++  const gfx::Size expected_buffer_size = {1920, 1080};
++  dxgi_device_manager_->GetMockDevice()->SetupDefaultMocks();
++  EXPECT_CALL(*(dxgi_device_manager_->GetMockDevice().Get()),
++              OnCreateTexture2D(_, _, _))
++      .Times(1);
++  EXPECT_CALL(*(dxgi_device_manager_->GetMockDevice().Get()),
++              OnGetDeviceRemovedReason())
++      .WillOnce([]() { return DXGI_ERROR_DEVICE_REMOVED; });
++
++  std::unique_ptr<VideoCaptureBufferTracker> tracker =
++      std::make_unique<GpuMemoryBufferTrackerWin>(dxgi_device_manager_);
++  ASSERT_TRUE(tracker->Init(expected_buffer_size, PIXEL_FORMAT_NV12, nullptr));
++  gfx::GpuMemoryBufferHandle gmb = tracker->GetGpuMemoryBufferHandle();
++  ASSERT_TRUE(gmb.is_null());
++  // Same short-circuit as fixed DeliverTextureToClient.
++  const bool is_valid_dxgi =
++      !gmb.is_null() && gmb.dxgi_handle().IsValid();
++  EXPECT_FALSE(is_valid_dxgi);
++}
++
+ TEST_F(GpuMemoryBufferTrackerWinTest, GetMemorySizeInBytes) {
+   // Verify that GpuMemoryBufferTrackerWin returns an expected value from
+   // GetMemorySizeInBytes
+diff --git a/media/capture/video/win/video_capture_device_mf_win.cc b/media/capture/video/win/video_capture_device_mf_win.cc
+index 4ae7ade7abc8c..a248a9204d010 100644
+--- a/media/capture/video/win/video_capture_device_mf_win.cc
++++ b/media/capture/video/win/video_capture_device_mf_win.cc
+@@ -2286,9 +2286,9 @@ HRESULT VideoCaptureDeviceMFWin::DeliverTextureToClient(
+   }
+ 
+   auto gmb_handle = capture_buffer.handle_provider->GetGpuMemoryBufferHandle();
+-  if (!gmb_handle.dxgi_handle().IsValid()) {
+-    // If the device is removed and GMB tracker fails to recreate it,
+-    // an empty gmb handle may be returned here.
++  // Empty handle is returned on DXGI device loss. dxgi_handle() CHECK_EQs
++  // DXGI_SHARED_HANDLE, so guard is_null() before touching the accessor.
++  if (gmb_handle.is_null() || !gmb_handle.dxgi_handle().IsValid()) {
+     return MF_E_UNEXPECTED;
+   }
+   hr = CopyTextureToGpuMemoryBuffer(texture,
+diff --git a/ui/gfx/BUILD.gn b/ui/gfx/BUILD.gn
+index 2a608f6c14c59..1872f0d09da99 100644
+--- a/ui/gfx/BUILD.gn
++++ b/ui/gfx/BUILD.gn
+@@ -754,6 +754,7 @@ test("gfx_unittests") {
+     "animation/keyframe/keyframed_animation_curve_unittest.cc",
+     "font_names_testing.h",
+     "font_unittest.cc",
++    "gpu_memory_buffer_handle_unittest.cc",
+     "geometry/linear_gradient_unittest.cc",
+     "geometry/mask_filter_info_unittest.cc",
+     "geometry/rrect_f_unittest.cc",
+diff --git a/ui/gfx/gpu_memory_buffer_handle_unittest.cc b/ui/gfx/gpu_memory_buffer_handle_unittest.cc
+new file mode 100644
+index 0000000000000..0df40ff394d18
+--- /dev/null
++++ b/ui/gfx/gpu_memory_buffer_handle_unittest.cc
+@@ -0,0 +1,60 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "base/test/gtest_util.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "ui/gfx/gpu_memory_buffer_handle.h"
++
++namespace gfx {
++namespace {
++
++#if BUILDFLAG(IS_WIN)
++void CallDxgiHandleOnEmpty() {
++  GpuMemoryBufferHandle empty;
++  (void)empty.dxgi_handle().IsValid();
++}
++#else
++void CallRvalueRegionOnEmpty() {
++  GpuMemoryBufferHandle empty;
++  base::UnsafeSharedMemoryRegion region = std::move(empty).region();
++  (void)region;
++}
++#endif
++
++// Field crash (Win video_capture utility): DeliverTextureToClient calls
++// dxgi_handle() on EMPTY_BUFFER after DXGI device loss. That accessor is
++// CHECK_EQ(type, DXGI_SHARED_HANDLE). Prove empty + typed accessor aborts.
++TEST(GpuMemoryBufferHandleDeathTest, EmptyHandleTypedAccessorChecks) {
++  GpuMemoryBufferHandle empty;
++  ASSERT_TRUE(empty.is_null());
++  ASSERT_EQ(empty.type, EMPTY_BUFFER);
++
++#if BUILDFLAG(IS_WIN)
++  EXPECT_CHECK_DEATH(CallDxgiHandleOnEmpty());
++#else
++  // Same CHECK contract on non-Win: rvalue region() requires SHARED_MEMORY.
++  EXPECT_CHECK_DEATH(CallRvalueRegionOnEmpty());
++#endif
++}
++
++
++// GREEN: fixed DeliverTextureToClient guard — is_null() short-circuits before
++// typed accessor, so empty handles do not CHECK.
++TEST(GpuMemoryBufferHandleDeathTest, EmptyHandleSafeGuardDoesNotDie) {
++  GpuMemoryBufferHandle empty;
++  ASSERT_TRUE(empty.is_null());
++  bool is_valid = false;
++  if (!empty.is_null()) {
++#if BUILDFLAG(IS_WIN)
++    is_valid = empty.dxgi_handle().IsValid();
++#else
++    base::UnsafeSharedMemoryRegion region = std::move(empty).region();
++    is_valid = region.IsValid();
++#endif
++  }
++  EXPECT_FALSE(is_valid);
++}
++
++}  // namespace
++}  // namespace gfx
+-- 
+2.53.0
+
