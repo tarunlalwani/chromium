@@ -1,0 +1,165 @@
+From aef93d35f9862ca4226d4fc3a397f5b5798e29b3 Mon Sep 17 00:00:00 2001
+From: Tarun Lalwani <tarunlalwani@gmail.com>
+Date: Tue, 14 Jul 2026 08:02:06 +0000
+Subject: [PATCH] Fix CHECK: do not restart done_headers_ HttpCache tx on doom
+ race
+
+When DoDoomEntryComplete gets ERR_CACHE_RACE after
+done_headers_create_new_entry_ is set, restarting via
+DoHeadersPhaseCannotProceed leaves the flag set and
+DoGetBackendComplete CHECK-fails.
+
+Abandon the cache (mode NONE) so the network response remains
+readable. Add a unit test that primes writers + validation
+no-match and races a deferred BYPASS create so the validating
+doom queues on the same PendingOp (real OnIOComplete race).
+
+Based on speculative CL 6817840; provides the missing repro.
+
+Bug: 428819090, 433619513
+---
+ net/http/http_cache_transaction.cc | 31 ++++++++++--
+ net/http/http_cache_unittest.cc    | 80 ++++++++++++++++++++++++++++++
+ 2 files changed, 108 insertions(+), 3 deletions(-)
+
+diff --git a/net/http/http_cache_transaction.cc b/net/http/http_cache_transaction.cc
+index 1d20ef849fc16..5df977226ffc1 100644
+--- a/net/http/http_cache_transaction.cc
++++ b/net/http/http_cache_transaction.cc
+@@ -1385,9 +1385,34 @@ int HttpCache::Transaction::DoDoomEntryComplete(int result) {
+   net_log_.EndEventWithNetErrorCode(NetLogEventType::HTTP_CACHE_DOOM_ENTRY,
+                                     result);
+   cache_pending_ = false;
+-  TransitionToState(result == ERR_CACHE_RACE
+-                        ? STATE_HEADERS_PHASE_CANNOT_PROCEED
+-                        : STATE_CREATE_ENTRY);
++
++  if (result == ERR_CACHE_RACE) {
++    // TODO(crbug.com/433619513): Remove this histogram in December 2025.
++    base::UmaHistogramBoolean(
++        "HttpCache.DoomEntryCompleteWithRaceDoneHeadersValue",
++        done_headers_create_new_entry_);
++
++    if (done_headers_create_new_entry_) {
++      // The network request has been sent and a response received which
++      // requires us to replace the existing entry, but we hit a race when we
++      // tried to delete the existing entry. To be on the safe side, stop trying
++      // to use the cache and let the client read the response from the network
++      // directly. This is a very rare event so the loss of cache hits is
++      // acceptable.
++      mode_ = NONE;
++      CHECK(network_trans_);
++      CHECK(!entry_);
++      CHECK(!new_entry_);
++      TransitionToState(STATE_NONE);
++      return OK;
++    }
++
++    // This will restart the transaction.
++    TransitionToState(STATE_HEADERS_PHASE_CANNOT_PROCEED);
++    return OK;
++  }
++
++  TransitionToState(STATE_CREATE_ENTRY);
+   return OK;
+ }
+ 
+diff --git a/net/http/http_cache_unittest.cc b/net/http/http_cache_unittest.cc
+index 4e4e7a8096620..da0e94860d862 100644
+--- a/net/http/http_cache_unittest.cc
++++ b/net/http/http_cache_unittest.cc
+@@ -34,6 +34,7 @@
+ #include "base/strings/to_string.h"
+ #include "base/test/bind.h"
+ #include "base/test/gmock_callback_support.h"
++#include "base/test/gtest_util.h"
+ #include "base/test/gmock_expected_support.h"
+ #include "base/test/metrics/histogram_tester.h"
+ #include "base/test/run_until.h"
+@@ -17510,4 +17511,83 @@ TEST_F(HttpCacheTest, SetMaxBytesZeroAfterInit) {
+   EXPECT_EQ(base::ByteSize(1), backend->GetMaxBytesForTesting());
+ }
+ 
++
++// Same pending-op race that previously CHECK-failed in
++// DoGetBackendComplete after DoDoomEntryComplete(ERR_CACHE_RACE) restarted a
++// done_headers_create_new_entry_ transaction. With the DoDoomEntryComplete
++// guard, the validating transaction abandons the cache (mode NONE) and the
++// network response remains readable (crbug 428819090 / 433619513).
++TEST_F(HttpCacheSimpleGetTest,
++       QueuedDoomRaceAfterDoneHeadersCreateNewEntryDoesNotRestart) {
++  MockHttpCache cache;
++
++  MockHttpRequest request(kSimpleGET_Transaction);
++
++  MockTransaction validate_transaction(kSimpleGET_Transaction);
++  validate_transaction.load_flags |= LOAD_VALIDATE_CACHE;
++  MockHttpRequest validate_request(validate_transaction);
++
++  MockTransaction bypass_transaction(kSimpleGET_Transaction);
++  bypass_transaction.load_flags |= LOAD_BYPASS_CACHE;
++  MockHttpRequest bypass_request(bypass_transaction);
++
++  const int kNumTransactions = 3;
++  std::vector<std::unique_ptr<Context>> context_list;
++  base::test::TestFuture<TransportInfo, CompletionOnceCallback>
++      connected_future;
++
++  for (int i = 0; i < kNumTransactions; ++i) {
++    context_list.push_back(std::make_unique<Context>());
++    auto& c = context_list[i];
++
++    c->trans = cache.CreateTransaction();
++    ASSERT_TRUE(c->trans);
++
++    MockHttpRequest* this_request = &request;
++    if (i == 2) {
++      this_request = &validate_request;
++      connected_future = ExpectConnected(*c->trans);
++    }
++
++    c->result = c->trans->Start(this_request, c->callback.callback(),
++                                NetLogWithSource());
++  }
++
++  base::RunLoop().RunUntilIdle();
++
++  ASSERT_TRUE(cache.IsHeadersTransactionPresent(request.CacheKey()));
++  ASSERT_EQ(kNumTransactions - 1,
++            cache.GetCountWriterTransactions(request.CacheKey()));
++
++  cache.disk_cache()->SetDefer(MockDiskEntry::DEFER_CREATE);
++
++  Context bypass_context;
++  bypass_context.trans = cache.CreateTransaction();
++  ASSERT_TRUE(bypass_context.trans);
++  bypass_context.result = bypass_context.trans->Start(
++      &bypass_request, bypass_context.callback.callback(), NetLogWithSource());
++  base::RunLoop().RunUntilIdle();
++
++  ContinueAfterConnect(std::move(connected_future));
++  base::RunLoop().RunUntilIdle();
++
++  cache.disk_cache()->ResumeCacheOperation();
++  base::RunLoop().RunUntilIdle();
++
++  for (auto& c : context_list) {
++    if (c->result == ERR_IO_PENDING) {
++      c->result = c->callback.WaitForResult();
++    }
++    ASSERT_EQ(OK, c->result);
++    ReadAndVerifyTransaction(c->trans.get(), kSimpleGET_Transaction);
++  }
++
++  if (bypass_context.result == ERR_IO_PENDING) {
++    bypass_context.result = bypass_context.callback.WaitForResult();
++  }
++  ASSERT_EQ(OK, bypass_context.result);
++  ReadAndVerifyTransaction(bypass_context.trans.get(), kSimpleGET_Transaction);
++}
++
++
+ }  // namespace net
+-- 
+2.53.0
+

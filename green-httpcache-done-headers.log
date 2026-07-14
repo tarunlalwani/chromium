@@ -1,0 +1,20 @@
+IMPORTANT DEBUGGING NOTE: batches of tests are run inside their
+own process. For debugging a test inside a debugger, use the
+--gtest_filter=<your_test_name> flag along with
+--single-process-tests.
+Using sharding settings from environment. This is shard 0/1
+Using 1 parallel jobs.
+Note: Google Test filter = HttpCacheSimpleGetTest.QueuedDoomRaceAfterDoneHeadersCreateNewEntryDoesNotRestart
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from HttpCacheSimpleGetTest
+[ RUN      ] HttpCacheSimpleGetTest.QueuedDoomRaceAfterDoneHeadersCreateNewEntryDoesNotRestart
+[       OK ] HttpCacheSimpleGetTest.QueuedDoomRaceAfterDoneHeadersCreateNewEntryDoesNotRestart (21 ms)
+[----------] 1 test from HttpCacheSimpleGetTest (22 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (24 ms total)
+[  PASSED  ] 1 test.
+[1/1] HttpCacheSimpleGetTest.QueuedDoomRaceAfterDoneHeadersCreateNewEntryDoesNotRestart (21 ms)
+SUCCESS: all tests passed.
+Tests took 4 seconds.
