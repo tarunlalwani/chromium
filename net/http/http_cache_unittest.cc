@@ -34,6 +34,7 @@
 #include "base/strings/to_string.h"
 #include "base/test/bind.h"
 #include "base/test/gmock_callback_support.h"
+#include "base/test/gtest_util.h"
 #include "base/test/gmock_expected_support.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/run_until.h"
@@ -17509,5 +17510,84 @@ TEST_F(HttpCacheTest, SetMaxBytesZeroAfterInit) {
   // means "pick a default".
   EXPECT_EQ(base::ByteSize(1), backend->GetMaxBytesForTesting());
 }
+
+
+// Same pending-op race that previously CHECK-failed in
+// DoGetBackendComplete after DoDoomEntryComplete(ERR_CACHE_RACE) restarted a
+// done_headers_create_new_entry_ transaction. With the DoDoomEntryComplete
+// guard, the validating transaction abandons the cache (mode NONE) and the
+// network response remains readable (crbug 428819090 / 433619513).
+TEST_F(HttpCacheSimpleGetTest,
+       QueuedDoomRaceAfterDoneHeadersCreateNewEntryDoesNotRestart) {
+  MockHttpCache cache;
+
+  MockHttpRequest request(kSimpleGET_Transaction);
+
+  MockTransaction validate_transaction(kSimpleGET_Transaction);
+  validate_transaction.load_flags |= LOAD_VALIDATE_CACHE;
+  MockHttpRequest validate_request(validate_transaction);
+
+  MockTransaction bypass_transaction(kSimpleGET_Transaction);
+  bypass_transaction.load_flags |= LOAD_BYPASS_CACHE;
+  MockHttpRequest bypass_request(bypass_transaction);
+
+  const int kNumTransactions = 3;
+  std::vector<std::unique_ptr<Context>> context_list;
+  base::test::TestFuture<TransportInfo, CompletionOnceCallback>
+      connected_future;
+
+  for (int i = 0; i < kNumTransactions; ++i) {
+    context_list.push_back(std::make_unique<Context>());
+    auto& c = context_list[i];
+
+    c->trans = cache.CreateTransaction();
+    ASSERT_TRUE(c->trans);
+
+    MockHttpRequest* this_request = &request;
+    if (i == 2) {
+      this_request = &validate_request;
+      connected_future = ExpectConnected(*c->trans);
+    }
+
+    c->result = c->trans->Start(this_request, c->callback.callback(),
+                                NetLogWithSource());
+  }
+
+  base::RunLoop().RunUntilIdle();
+
+  ASSERT_TRUE(cache.IsHeadersTransactionPresent(request.CacheKey()));
+  ASSERT_EQ(kNumTransactions - 1,
+            cache.GetCountWriterTransactions(request.CacheKey()));
+
+  cache.disk_cache()->SetDefer(MockDiskEntry::DEFER_CREATE);
+
+  Context bypass_context;
+  bypass_context.trans = cache.CreateTransaction();
+  ASSERT_TRUE(bypass_context.trans);
+  bypass_context.result = bypass_context.trans->Start(
+      &bypass_request, bypass_context.callback.callback(), NetLogWithSource());
+  base::RunLoop().RunUntilIdle();
+
+  ContinueAfterConnect(std::move(connected_future));
+  base::RunLoop().RunUntilIdle();
+
+  cache.disk_cache()->ResumeCacheOperation();
+  base::RunLoop().RunUntilIdle();
+
+  for (auto& c : context_list) {
+    if (c->result == ERR_IO_PENDING) {
+      c->result = c->callback.WaitForResult();
+    }
+    ASSERT_EQ(OK, c->result);
+    ReadAndVerifyTransaction(c->trans.get(), kSimpleGET_Transaction);
+  }
+
+  if (bypass_context.result == ERR_IO_PENDING) {
+    bypass_context.result = bypass_context.callback.WaitForResult();
+  }
+  ASSERT_EQ(OK, bypass_context.result);
+  ReadAndVerifyTransaction(bypass_context.trans.get(), kSimpleGET_Transaction);
+}
+
 
 }  // namespace net
