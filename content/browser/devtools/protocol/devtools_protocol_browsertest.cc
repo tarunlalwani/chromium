@@ -5453,4 +5453,176 @@ IN_PROC_BROWSER_TEST_F(PrefetchActivationBeaconDevToolsProtocolTest,
   EXPECT_TRUE(beacon_seen);
 }
 
+
+// Fetch.requestPaused at Response: getResponseBody then continueResponse.
+// Covers Collect UAF (POST+body), Resume-null, and continue after upstream
+// OnComplete (must CompleteRequest or the renderer fetch hangs).
+class DevToolsFetchGetResponseBodyTest : public DevToolsProtocolTest {
+ public:
+  void DispatchProtocolMessage(DevToolsAgentHost* agent_host,
+                               base::span<const uint8_t> message) override {
+    if (!auto_handle_paused_ || in_auto_handle_) {
+      DevToolsProtocolTest::DispatchProtocolMessage(agent_host, message);
+      return;
+    }
+
+    std::optional<base::Value> parsed = base::JSONReader::Read(
+        std::string_view(reinterpret_cast<const char*>(message.data()),
+                         message.size()),
+        base::JSON_PARSE_CHROMIUM_EXTENSIONS);
+    if (parsed && parsed->is_dict()) {
+      const std::string* method = parsed->GetDict().FindString("method");
+      if (method && *method == "Fetch.requestPaused") {
+        const base::DictValue* params = parsed->GetDict().FindDict("params");
+        const std::string* request_id =
+            params ? params->FindString("requestId") : nullptr;
+        if (request_id) {
+          in_auto_handle_ = true;
+          base::DictValue body_params;
+          body_params.Set("requestId", *request_id);
+          SendCommandSync("Fetch.getResponseBody", std::move(body_params));
+          got_body_++;
+
+          if (defer_continue_) {
+            std::string id = *request_id;
+            base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+                FROM_HERE, base::BindOnce(
+                               [](DevToolsFetchGetResponseBodyTest* self,
+                                  std::string request_id) {
+                                 if (!self->auto_handle_paused_) {
+                                   return;
+                                 }
+                                 base::DictValue cont;
+                                 cont.Set("requestId", request_id);
+                                 self->SendCommandSync("Fetch.continueResponse",
+                                                       std::move(cont));
+                                 self->continued_++;
+                               },
+                               base::Unretained(this), std::move(id)));
+          } else {
+            base::DictValue cont;
+            cont.Set("requestId", *request_id);
+            SendCommandSync("Fetch.continueResponse", std::move(cont));
+            continued_++;
+          }
+          in_auto_handle_ = false;
+        }
+      }
+    }
+
+    DevToolsProtocolTest::DispatchProtocolMessage(agent_host, message);
+  }
+
+ protected:
+  void EnableFetchResponseInterception() {
+    base::DictValue enable_params;
+    base::ListValue patterns;
+    {
+      base::DictValue p;
+      p.Set("requestStage", "Response");
+      p.Set("resourceType", "Fetch");
+      patterns.Append(std::move(p));
+    }
+    {
+      base::DictValue p;
+      p.Set("requestStage", "Response");
+      p.Set("resourceType", "XHR");
+      patterns.Append(std::move(p));
+    }
+    enable_params.Set("patterns", std::move(patterns));
+    SendCommandSync("Fetch.enable", std::move(enable_params));
+    ASSERT_FALSE(error());
+  }
+
+  bool auto_handle_paused_ = false;
+  bool defer_continue_ = false;
+  bool in_auto_handle_ = false;
+  int got_body_ = 0;
+  int continued_ = 0;
+};
+
+IN_PROC_BROWSER_TEST_F(DevToolsFetchGetResponseBodyTest,
+                       PostWithBodyGetResponseBodyThenContinue) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+  GURL page_url = embedded_test_server()->GetURL("/title1.html");
+  GURL echo_url = embedded_test_server()->GetURL("/echo");
+  NavigateToURLBlockUntilNavigationsComplete(shell(), page_url, 1);
+
+  Attach();
+  EnableFetchResponseInterception();
+  auto_handle_paused_ = true;
+
+  std::string script = base::StringPrintf(
+      R"((async () => {
+        const r = await fetch('%s', {
+          method: 'POST',
+          credentials: 'omit',
+          headers: {'content-type': 'application/json'},
+          body: JSON.stringify({payload: 'x'.repeat(64)}),
+        });
+        await r.text();
+        return 'done';
+      })())",
+      echo_url.spec().c_str());
+
+  EXPECT_EQ("done", EvalJs(shell(), script));
+  auto_handle_paused_ = false;
+  EXPECT_GE(got_body_, 1);
+  EXPECT_GE(continued_, 1);
+  SendCommandSync("Fetch.disable");
+}
+
+IN_PROC_BROWSER_TEST_F(DevToolsFetchGetResponseBodyTest,
+                       GetWithoutBodyGetResponseBodyThenContinue) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+  GURL page_url = embedded_test_server()->GetURL("/title1.html");
+  GURL get_url = embedded_test_server()->GetURL("/echo");
+  NavigateToURLBlockUntilNavigationsComplete(shell(), page_url, 1);
+
+  Attach();
+  EnableFetchResponseInterception();
+  auto_handle_paused_ = true;
+
+  std::string script = base::StringPrintf(
+      R"((async () => {
+        const r = await fetch('%s', {credentials: 'omit'});
+        await r.text();
+        return 'done';
+      })())",
+      get_url.spec().c_str());
+
+  EXPECT_EQ("done", EvalJs(shell(), script));
+  auto_handle_paused_ = false;
+  EXPECT_GE(got_body_, 1);
+  EXPECT_GE(continued_, 1);
+  SendCommandSync("Fetch.disable");
+}
+
+IN_PROC_BROWSER_TEST_F(DevToolsFetchGetResponseBodyTest,
+                       DeferredContinueAfterGetResponseBodyCompletes) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+  GURL page_url = embedded_test_server()->GetURL("/title1.html");
+  GURL get_url = embedded_test_server()->GetURL("/echo");
+  NavigateToURLBlockUntilNavigationsComplete(shell(), page_url, 1);
+
+  Attach();
+  EnableFetchResponseInterception();
+  defer_continue_ = true;
+  auto_handle_paused_ = true;
+
+  std::string script = base::StringPrintf(
+      R"((async () => {
+        const r = await fetch('%s', {credentials: 'omit'});
+        const text = await r.text();
+        return text.length >= 0 ? 'done' : 'empty';
+      })())",
+      get_url.spec().c_str());
+
+  EXPECT_EQ("done", EvalJs(shell(), script));
+  auto_handle_paused_ = false;
+  EXPECT_GE(got_body_, 1);
+  EXPECT_GE(continued_, 1);
+  SendCommandSync("Fetch.disable");
+}
+
 }  // namespace content

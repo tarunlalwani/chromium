@@ -1150,7 +1150,9 @@ void InterceptionJob::GetResponseBody(
   if (!body_reader_) {
     body_reader_ = std::make_unique<BodyReader>(base::BindOnce(
         &InterceptionJob::ResponseBodyComplete, base::Unretained(this)));
-    client_receiver_.Resume();
+    if (client_receiver_.is_bound()) {
+      client_receiver_.Resume();
+    }
   }
   body_reader_->AddCallback(std::move(callback));
   // Needs to happen after |AddCallback| to avoid a DCHECK.
@@ -1171,7 +1173,9 @@ void InterceptionJob::TakeResponseBodyPipe(
   DCHECK(!!response_metadata_);
   state_ = State::kResponseTaken;
   pending_response_body_pipe_callback_ = std::move(callback);
-  client_receiver_.Resume();
+  if (client_receiver_.is_bound()) {
+    client_receiver_.Resume();
+  }
   if (body_)
     StartLoadingResponseBody(std::move(body_));
 }
@@ -1319,8 +1323,14 @@ Response InterceptionJob::InnerContinueRequest(
     client_->OnReceiveResponse(std::move(response_metadata_->head),
                                std::move(body_),
                                std::move(response_metadata_->cached_metadata));
-    response_metadata_.reset();
-    client_receiver_.Resume();
+    if (client_receiver_.is_bound()) {
+      response_metadata_.reset();
+      client_receiver_.Resume();
+    } else {
+      network::URLLoaderCompletionStatus status = response_metadata_->status;
+      response_metadata_.reset();
+      CompleteRequest(status);
+    }
     return Response::Success();
   }
 
@@ -1728,8 +1738,8 @@ void InterceptionJob::FetchCookies(base::OnceClosure callback) {
 
   cookie_manager_->GetCookieList(
       request.url, options, net::CookiePartitionKeyCollection(),
-      base::BindOnce(&InterceptionJob::OnGotCookies, base::Unretained(this),
-                     std::move(callback)));
+      base::BindOnce(&InterceptionJob::OnGotCookies,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
 }
 
 void InterceptionJob::NotifyClient(
@@ -1751,19 +1761,32 @@ void InterceptionJob::NotifyClient(
       (have_cookies == want_cookies ? 0 : 1) +
       (have_request_bodies == want_request_bodies ? 0 : 1);
 
+  // Collect/Barrier may complete re-entrantly and destroy `this` before return.
+  base::WeakPtr<InterceptionJob> self = weak_ptr_factory_.GetWeakPtr();
   base::RepeatingClosure closure = BarrierClosure(
       pending_callback_count,
-      base::BindOnce(&InterceptionJob::CompleteNotifyingClient,
-                     base::Unretained(this), std::move(request_info)));
+      base::BindOnce(&InterceptionJob::CompleteNotifyingClient, self,
+                     std::move(request_info)));
+  if (!self) {
+    return;
+  }
   if (have_cookies != want_cookies) {
     FetchCookies(closure);
+    if (!self) {
+      return;
+    }
   }
   if (have_request_bodies != want_request_bodies) {
     CHECK(!request_body_collector_);
-    request_body_collector_ = RequestBodyCollector::Collect(
-        *request.request_body,
-        base::BindOnce(&InterceptionJob::OnGotRequestBodies,
-                       base::Unretained(this), closure));
+    std::unique_ptr<RequestBodyCollector> collector =
+        RequestBodyCollector::Collect(
+            *request.request_body,
+            base::BindOnce(&InterceptionJob::OnGotRequestBodies, self,
+                           closure));
+    if (!self) {
+      return;
+    }
+    request_body_collector_ = std::move(collector);
   }
 }
 
